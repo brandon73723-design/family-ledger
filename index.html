@@ -143,6 +143,18 @@ nav button[aria-current=page]{color:var(--ink);font-weight:700;box-shadow:inset 
 .scanner .btns button{flex:1;border-radius:12px;padding:12px;border:1px solid var(--line);background:var(--paper);font-size:16px}
 .scanner .btns .go{background:var(--ink);color:var(--paper);border-color:var(--ink)}
 .scanner .btns .go:disabled{opacity:.4}
+.filebtn{display:inline-block;border:1px solid var(--line);background:var(--soft);border-radius:10px;padding:9px 16px;font-size:15px;color:var(--ink);cursor:pointer}
+.filebtn input{position:absolute;width:1px;height:1px;opacity:0}
+.implist{margin:12px 0 0;border-top:1px solid var(--line)}
+.impitem{padding:10px 0;border-bottom:1px solid var(--line)}
+.impitem.off{opacity:.55}
+.impitem .chk{display:flex;gap:10px;align-items:flex-start;color:var(--ink);font-size:15px}
+.impitem .chk input{margin-top:4px;width:18px;height:18px;flex:none}
+.impitem .chk > span:nth-child(2){flex:1;min-width:0;overflow-wrap:anywhere}
+.impitem .a{font-family:var(--num);font-size:17px;white-space:nowrap}
+.impitem select{display:block;width:calc(100% - 28px);margin:6px 0 0 28px;padding:7px 8px;border:1px solid var(--line);border-radius:8px;background:var(--paper);font-size:15px;color:var(--ink)}
+.tag{display:inline-block;margin:6px 0 0 28px;font-size:12px;padding:1px 8px;border-radius:999px;background:var(--soft);color:var(--muted)}
+.tag.warn{color:var(--warn)}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}.typ button{transform:none!important}}
 </style>
 </head>
@@ -150,18 +162,18 @@ nav button[aria-current=page]{color:var(--ink);font-weight:700;box-shadow:inset 
 <div id="app"><div class="login"><h1>家庭記帳</h1><p class="muted">載入中…</p></div></div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
+<script src="config.js"></script>
 <script>
-/* ===== 部署後端後，把網頁應用程式的網址貼在這裡（也可以第一次打開網頁時再貼） ===== */
-var API_URL = 'https://script.google.com/macros/s/AKfycbznyU_19BDb3ln_E5-NCxh-HfJaJzOV68ZiNUKNzepn_svx0yDojMMpMi0k9U42iT7y/exec';
-
-/* 分帳功能：false 關閉（不顯示「誰付的錢」和分帳結算），改成 true 就會重新開啟 */
-var SPLIT = false;
+/* 後端網址和分帳開關放在 config.js，更新這個檔案時不用再改 */
+var CFG = window.LEDGER_CONFIG || {};
+var API_URL = String(CFG.apiUrl || '').trim();
+var SPLIT = !!CFG.split;
 
 var KEY = 'family-ledger-login', KEY_API = 'family-ledger-api';
 var WEEK = '日一二三四五六';
 var COLORS = ['#2F7D69', '#C4553F', '#D19A2E', '#4677A8', '#8A5A9E', '#6E8B2A', '#B86A2E', '#4E8E9C', '#A54D6B', '#7B7F86'];
 var S = { me: null, pin: '', members: [], cats: [], accounts: [], cycles: [], ledger: '家庭', ym: ymOf(new Date()),
-  data: null, tab: 'add', busy: false, pick: '', f: null, r: null };
+  data: null, tab: 'add', busy: false, pick: '', f: null, r: null, imp: null, storeRules: [] };
 
 function ymOf(d) { return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2); }
 function today() { var d = new Date(); return ymOf(d) + '-' + ('0' + d.getDate()).slice(-2); }
@@ -232,7 +244,7 @@ function showLogin(err) {
 }
 function doLogin(name, pin, silent) {
   api('login').then(function (r) {
-    S.me = r.me; S.members = r.members; S.cats = r.cats; S.accounts = r.accounts; S.cycles = r.cycles;
+    S.me = r.me; S.members = r.members; S.cats = r.cats; S.accounts = r.accounts; S.cycles = r.cycles; S.storeRules = r.storeRules || []; S.imp = null;
     S.ledger = isParent() ? '家庭' : r.me.name;
     store(KEY, { name: name, pin: pin });
     S.f = newForm('支出'); S.r = newRep();
@@ -539,6 +551,7 @@ function viewMore(d) {
     '<label' + (SPLIT ? '' : ' class="full"') + '>帳戶<select data-r="account"><option value="">不指定</option>' + opts(S.accounts, r.account) + '</select></label>' +
     (SPLIT ? '<label>誰付<select data-r="payer">' + opts(parents().map(function (p) { return p.name; }).concat(['共同帳戶']), r.payer) + '</select></label>' : '') +
     '</div><button class="primary" type="submit">新增定期帳單</button></form>';
+  html += viewImport();
   html += '<section class="card"><h2>其他設定</h2><p class="muted">分類、每月預算、帳戶和家人密碼，都在雲端硬碟「家庭記帳」資料夾的試算表裡修改，改完重新登入就會套用。</p></section>';
   return html;
 }
@@ -594,6 +607,7 @@ function bind() {
   if ($('#rf')) $('#rf').onsubmit = function (e) { e.preventDefault();
     if (!S.r.title.trim()) { toast('請輸入名稱'); return; }
     setBusy(true); api('repAdd', { rep: S.r, ym: S.ym }).then(function (d) { S.r = newRep(); apply(d); toast('已新增定期帳單'); }).catch(fail); };
+  bindImport();
 }
 
 function shift(n) {
@@ -736,6 +750,206 @@ function finishScan() {
   if (inv.items.length) S.f.note = inv.items.map(function (it) { return it.name + (it.qty > 1 ? '×' + it.qty : ''); }).join('、').slice(0, 300);
   render();
   toast('已帶入發票 ' + inv.number + '，確認分類後按「記下這筆」', 3000);
+}
+
+
+/* ================= 匯入載具發票（發票存摺 CSV） ================= */
+var IMP_RULES = [
+  [/自來水/, '水電瓦斯', ['水費']],
+  [/電力/, '水電瓦斯', ['電費']],
+  [/瓦斯|天然氣/, '水電瓦斯', ['瓦斯費']],
+  [/中華電信|遠傳|台灣大哥大|台灣之星|亞太電信/, '手機', ['電信費']],
+  [/Netflix|Spotify|YouTube|Disney|KKBOX|愛奇藝|friDay|Apple|iTunes/i, '訂閱服務', ['影音串流']],
+  [/Anthropic|Claude|OpenAI|Google|Gemini|Microsoft|GitHub/i, '訂閱服務', ['AI 工具', 'AI工具']],
+  [/加油|油品|石油|石化|中油/, '交通', ['油資']],
+  [/停車|高鐵|台鐵|悠遊|一卡通|客運|捷運|Uber/i, '交通', ['大眾運輸']],
+  [/全聯|家樂福|好市多|COSTCO|美廉社|三商家購|楓康|頂好|愛買|大潤發|超市|市場/i, '伙食費', ['其他食材']],
+  [/全家|統一超商|7-ELEVEN|萊爾富|來來超商|OK便利/i, '伙食費', ['MEAL']],
+  [/餐|食|麵|飯|鍋|咖啡|飲|茶|早午餐|麥當勞|肯德基|摩斯|漢堡|披薩|壽司|樂比亞/, '伙食費', ['MEAL']],
+  [/文具|書局|誠品|金石堂|博客來/, '日用雜貨', ['書籍文具']],
+  [/屈臣氏|康是美|寶雅|小北|生活百貨/, '日用雜貨', ['清潔衛生']],
+  [/藥局|藥妝|診所|醫院|醫療|牙醫/, '醫療', ['看診醫藥']],
+  [/寵物|動物醫院|毛孩/, '貓咪', ['飼料']],
+  [/燦坤|全國電子|順發|3C|電腦/, '日用雜貨', ['3C用品']],
+  [/保險|人壽|產險/, '保險', ['保險費']]
+];
+function famCatsList() {
+  return S.cats.filter(function (c) { return c.ledger === '家庭' && c.type === '支出'; });
+}
+function hasCat(cat, sub) { return famCatsList().some(function (c) { return c.cat === cat && (sub === undefined || c.sub === sub); }); }
+function mealSub(time) {
+  var h = Number((time || '12:00').slice(0, 2)) + Number((time || '12:00').slice(3, 5)) / 60;
+  var want = h < 10.5 ? '早餐' : h < 14.5 ? '午餐' : h >= 16.5 && h < 21 ? '晚餐' : '點心零食';
+  return hasCat('伙食費', want) ? want : (hasCat('伙食費', '外食其他') ? '外食其他' : '');
+}
+function firstSub(cat) { var c = famCatsList().filter(function (x) { return x.cat === cat; })[0]; return c ? c.sub : ''; }
+function fallbackCat() {
+  if (hasCat('其他')) return { cat: '其他', sub: firstSub('其他') };
+  var c = famCatsList()[0]; return c ? { cat: c.cat, sub: c.sub } : { cat: '', sub: '' };
+}
+function ruleHit(text, how) {
+  for (var i = 0; i < IMP_RULES.length; i++) {
+    var r = IMP_RULES[i];
+    if (!text || !r[0].test(text) || !hasCat(r[1])) continue;
+    var sub = '';
+    if (r[2][0] === 'MEAL') sub = mealSub(how.time);
+    else for (var k = 0; k < r[2].length; k++) if (hasCat(r[1], r[2][k])) { sub = r[2][k]; break; }
+    return { cat: r[1], sub: sub || firstSub(r[1]), how: 'rule' };
+  }
+  return null;
+}
+function guessCat(inv) {
+  var learned = (S.storeRules || []).filter(function (r) { return r.sellerId && r.sellerId === inv.sellerId; })[0];
+  if (learned && hasCat(learned.cat, learned.sub)) {
+    if (learned.cat === '伙食費' && /^(早餐|午餐|晚餐)$/.test(learned.sub)) return { cat: '伙食費', sub: mealSub(inv.time) || learned.sub, how: 'learned' };
+    return { cat: learned.cat, sub: learned.sub, how: 'learned' };
+  }
+  var g = ruleHit(inv.storeFull, inv) || ruleHit(inv.items.map(function (i) { return i.name; }).join(' '), inv);
+  if (g) return g;
+  var f = fallbackCat(); f.how = 'none'; return f;
+}
+function shortStore(name) {
+  var s = String(name || '').trim();
+  var m = s.match(/^(.*?)(股份有限公司|有限公司)(.*)$/);
+  if (m) {
+    var brand = m[1].replace(/^(日商|美商|英商|韓商|英屬[^ ]*)/, '');
+    var branch = m[3].replace(/(台灣分公司|分公司|門市部|服務所|營業處)$/g, '').replace(/^(台灣分公司)/, '');
+    s = (brand + (branch ? ' ' + branch : '')).trim();
+  }
+  return s.slice(0, 30);
+}
+function parseCSV(text) {
+  var rows = [], row = [], f = '', q = false;
+  text = text.replace(/^\uFEFF/, '');
+  for (var i = 0; i < text.length; i++) {
+    var c = text[i];
+    if (q) { if (c === '"') { if (text[i + 1] === '"') { f += '"'; i++; } else q = false; } else f += c; }
+    else if (c === '"') q = true;
+    else if (c === ',') { row.push(f); f = ''; }
+    else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(f); rows.push(row); row = []; f = ''; }
+    else f += c;
+  }
+  if (f !== '' || row.length) { row.push(f); rows.push(row); }
+  return rows.filter(function (r) { return r.some(function (x) { return x.trim(); }); });
+}
+function parseInvoiceCSV(text) {
+  var rows = parseCSV(text);
+  if (!rows.length) throw new Error('檔案是空的');
+  var h = rows[0].map(function (x) { return x.trim(); });
+  var col = function (n) { return h.indexOf(n); };
+  var need = ['消費時間', '發票號碼', '店家名稱', '消費品項', '小計', '總計'];
+  var miss = need.filter(function (n) { return col(n) < 0; });
+  if (miss.length) throw new Error('格式不符，缺少欄位：' + miss.join('、') + '。請用發票存摺匯出「全部發票」格式');
+  var map = {}, order = [];
+  rows.slice(1).forEach(function (r) {
+    var no = String(r[col('發票號碼')] || '').trim().toUpperCase();
+    if (!no) return;
+    var t = String(r[col('消費時間')] || '').trim();
+    var dm = t.match(/(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})(?:\s+(\d{1,2}:\d{2}))?/);
+    if (!map[no]) {
+      map[no] = { invoice: no, date: dm ? dm[1] + '-' + ('0' + dm[2]).slice(-2) + '-' + ('0' + dm[3]).slice(-2) : '',
+        time: dm && dm[4] ? ('0' + dm[4]).slice(-5) : '', storeFull: String(r[col('店家名稱')] || '').trim(),
+        sellerId: col('賣方統編') >= 0 ? String(r[col('賣方統編')] || '').replace(/[^0-9]/g, '') : '', total: null, sum: 0, items: [] };
+      order.push(no);
+    }
+    var inv = map[no], tot = String(r[col('總計')] || '').trim(), sub = Number(r[col('小計')]) || 0;
+    if (tot !== '' && inv.total === null) inv.total = Number(tot);
+    inv.sum += sub;
+    var name = String(r[col('消費品項')] || '').trim();
+    var qty = col('個數') >= 0 ? Number(r[col('個數')]) || 1 : 1;
+    if (name && sub > 0 && !/印花|貼紙|折扣|折抵|促|優惠/.test(name)) {
+      var ex = inv.items.filter(function (x) { return x.name === name; })[0];
+      if (ex) ex.qty += qty; else inv.items.push({ name: name, qty: qty });
+    }
+  });
+  return order.map(function (no) {
+    var inv = map[no];
+    inv.amount = Math.round(inv.total !== null && !isNaN(inv.total) ? inv.total : inv.sum);
+    inv.store = shortStore(inv.storeFull);
+    var items = inv.items.map(function (x) { return x.name + (x.qty > 1 && x.qty === Math.round(x.qty) ? '×' + x.qty : ''); }).join('、');
+    inv.note = (inv.store + (items ? '：' + items : '')).slice(0, 200);
+    return inv;
+  }).filter(function (inv) { return inv.amount > 0 && inv.date; });
+}
+function startImport(file) {
+  if (!file) return;
+  var reader = new FileReader();
+  reader.onload = function () {
+    var list;
+    try { list = parseInvoiceCSV(String(reader.result)); } catch (e) { toast(e.message, 4000); return; }
+    if (!list.length) { toast('檔案裡沒有可匯入的發票'); return; }
+    setBusy(true);
+    api('importCheck', { items: list.map(function (x) { return { invoice: x.invoice, date: x.date, amount: x.amount }; }) }).then(function (res) {
+      list.forEach(function (inv, i) {
+        var st = res[i] || { status: 'new' };
+        var g = guessCat(inv);
+        inv.status = st.status; inv.match = st.match || '';
+        inv.cat = g.cat; inv.sub = g.sub; inv.how = g.how;
+        inv.on = st.status === 'new';
+      });
+      S.imp = { list: list, account: '', payer: S.me.name, file: file.name };
+      setBusy(false); render();
+    }).catch(fail);
+  };
+  reader.onerror = function () { toast('檔案讀取失敗'); };
+  reader.readAsText(file, 'utf-8');
+}
+function impTotals() {
+  var n = 0, amt = 0;
+  (S.imp ? S.imp.list : []).forEach(function (x) { if (x.on && x.status !== 'dup') { n++; amt += x.amount; } });
+  return { n: n, amt: amt };
+}
+function viewImport() {
+  var html = '<section class="card"><h2>匯入載具發票</h2>';
+  if (!S.imp) {
+    return html + '<p class="muted">用「發票存摺」App 匯出的 CSV（選「全部發票」格式），一次匯入一個月的載具發票。已記過的發票會自動略過。</p>' +
+      '<label class="filebtn">選擇 CSV 檔<input type="file" id="impFile" accept=".csv,text/csv"></label></section>';
+  }
+  var L = S.imp.list, dup = L.filter(function (x) { return x.status === 'dup'; }).length, maybe = L.filter(function (x) { return x.status === 'maybe'; }).length;
+  var cats = famCatsList();
+  var t = impTotals();
+  html += '<p class="muted">' + esc(S.imp.file) + '：共 ' + L.length + ' 張發票' + (dup ? '，' + dup + ' 張已記過（不會匯入）' : '') +
+    (maybe ? '，' + maybe + ' 張可能已用定期帳單或手動記過，預設不勾選' : '') + '。分類是依店家自動判斷的，請檢查後再匯入。</p>' +
+    '<div class="grid"><label' + (SPLIT ? '' : ' class="full"') + '>這些發票用哪個帳戶付<select id="impAcc"><option value="">不指定</option>' + opts(S.accounts, S.imp.account) + '</select></label>' +
+    (SPLIT ? '<label>誰付的錢<select id="impPayer">' + opts(parents().map(function (p) { return p.name; }).concat(['共同帳戶']), S.imp.payer) + '</select></label>' : '') + '</div>' +
+    '<div class="implist">' + L.map(function (x, i) {
+      var sel = cats.map(function (c) { var v = c.cat + '|' + c.sub;
+        return '<option value="' + esc(v) + '"' + (c.cat === x.cat && c.sub === x.sub ? ' selected' : '') + '>' + esc(c.cat + (c.sub ? ' › ' + c.sub : '')) + '</option>'; }).join('');
+      var tag = x.status === 'dup' ? '<span class="tag">已記過</span>' : x.status === 'maybe' ? '<span class="tag warn">可能重複：' + esc(x.match) + '</span>' :
+        x.how === 'none' ? '<span class="tag warn">請選分類</span>' : x.how === 'learned' ? '<span class="tag">記得的分類</span>' : '';
+      return '<div class="impitem' + (x.status === 'dup' ? ' off' : '') + '"><label class="chk"><input type="checkbox" data-imp-on="' + i + '"' +
+        (x.on && x.status !== 'dup' ? ' checked' : '') + (x.status === 'dup' ? ' disabled' : '') + '><span><b>' + Number(x.date.slice(5, 7)) + '/' + Number(x.date.slice(8)) +
+        ' ' + esc(x.store) + '</b><br><span class="who">' + esc(x.note.replace(x.store + '：', '').slice(0, 60)) + '</span></span><span class="a out">' + money(x.amount) +
+        '</span></label>' + (x.status === 'dup' ? '' : '<select data-imp-cat="' + i + '" aria-label="分類">' + sel + '</select>') + tag + '</div>';
+    }).join('') + '</div>' +
+    '<button class="primary" type="button" id="impGo"' + (t.n ? '' : ' disabled') + '>匯入勾選的 ' + t.n + ' 張（' + money(t.amt) + ' 元）</button>' +
+    '<p class="hint"><button type="button" class="link" id="impCancel">取消，重新選檔案</button></p></section>';
+  return html;
+}
+function bindImport() {
+  if ($('#impFile')) $('#impFile').onchange = function (e) { startImport(e.target.files[0]); e.target.value = ''; };
+  if (!S.imp) return;
+  var upd = function () { var t = impTotals(), b = $('#impGo'); if (b) { b.disabled = !t.n; b.textContent = '匯入勾選的 ' + t.n + ' 張（' + money(t.amt) + ' 元）'; } };
+  $$('[data-imp-on]').forEach(function (el) { el.onchange = function () { S.imp.list[Number(el.dataset.impOn)].on = el.checked; upd(); }; });
+  $$('[data-imp-cat]').forEach(function (el) { el.onchange = function () {
+    var x = S.imp.list[Number(el.dataset.impCat)], p = el.value.split('|'); x.cat = p[0]; x.sub = p[1] || ''; x.how = 'user'; }; });
+  if ($('#impAcc')) $('#impAcc').onchange = function (e) { S.imp.account = e.target.value; };
+  if ($('#impPayer')) $('#impPayer').onchange = function (e) { S.imp.payer = e.target.value; };
+  $('#impCancel').onclick = function () { S.imp = null; render(); };
+  $('#impGo').onclick = function () {
+    var pick = S.imp.list.filter(function (x) { return x.on && x.status !== 'dup'; });
+    if (!pick.length) return;
+    if (!confirm('匯入 ' + pick.length + ' 張發票，共 ' + money(impTotals().amt) + ' 元？')) return;
+    var recs = pick.map(function (x) { return { invoice: x.invoice, date: x.date, amount: x.amount, cat: x.cat, sub: x.sub, note: x.note,
+      account: S.imp.account, payer: SPLIT ? S.imp.payer : S.me.name }; });
+    var rules = pick.filter(function (x) { return x.sellerId; }).map(function (x) { return { sellerId: x.sellerId, store: x.store, cat: x.cat, sub: x.sub }; });
+    setBusy(true);
+    api('importSave', { recs: recs, rules: rules }).then(function (r) {
+      S.storeRules = r.storeRules || S.storeRules; S.imp = null;
+      toast('已匯入 ' + r.added + ' 張' + (r.skipped ? '，略過 ' + r.skipped + ' 張' : ''), 3500);
+      refresh();
+    }).catch(fail);
+  };
 }
 
 start();
