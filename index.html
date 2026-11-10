@@ -94,6 +94,8 @@ label > input,label > select{display:block;width:100%;margin-top:3px;padding:9px
 .item .t p{margin:1px 0 0;font-size:14px;color:var(--muted);overflow-wrap:anywhere}
 .item .a{font-family:var(--num);font-size:18px;white-space:nowrap;text-align:right}
 .item.editing{background:var(--soft)}
+.item.pending{opacity:.6}
+.saving{display:block;font-size:12px;color:var(--muted);text-align:right}
 .search{display:flex;gap:8px;margin:0 0 12px}
 .search input{flex:1;min-width:0;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--paper);font-size:16px;color:var(--ink)}
 .search select{padding:10px 8px;border:1px solid var(--line);border-radius:12px;background:var(--paper);font-size:15px;color:var(--ink)}
@@ -187,11 +189,11 @@ var CFG = window.LEDGER_CONFIG || {};
 var API_URL = String(CFG.apiUrl || '').trim();
 var SPLIT = !!CFG.split;
 
-var KEY = 'family-ledger-login', KEY_API = 'family-ledger-api';
+var KEY = 'family-ledger-login', KEY_API = 'family-ledger-api', KEY_BOOT = 'family-ledger-boot', KEY_CACHE = 'family-ledger-cache';
 var WEEK = '日一二三四五六';
 var COLORS = ['#2F7D69', '#C4553F', '#D19A2E', '#4677A8', '#8A5A9E', '#6E8B2A', '#B86A2E', '#4E8E9C', '#A54D6B', '#7B7F86'];
 var S = { me: null, pin: '', members: [], cats: [], accounts: [], cycles: [], ledger: '家庭', ym: ymOf(new Date()),
-  data: null, tab: 'add', busy: false, pick: '', f: null, r: null, imp: null, storeRules: [], edit: null, repCat: null, q: '', qAll: false, qRes: null, qTok: 0, typeF: '' };
+  data: null, tab: 'add', busy: false, pick: '', f: null, r: null, imp: null, storeRules: [], edit: null, repCat: null, q: '', qAll: false, qRes: null, qTok: 0, typeF: '', cache: {}, gen: 0, reqTok: 0, pending: [], needRender: false };
 
 function ymOf(d) { return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2); }
 function today() { var d = new Date(); return ymOf(d) + '-' + ('0' + d.getDate()).slice(-2); }
@@ -224,7 +226,17 @@ function api(action, extra) {
 function start() {
   if (!apiUrl()) { showSetup(''); return; }
   var saved = read(KEY);
-  if (saved && saved.name && saved.pin) { S.me = { name: saved.name }; S.pin = saved.pin; doLogin(saved.name, saved.pin, true); return; }
+  if (saved && saved.name && saved.pin) {
+    S.me = { name: saved.name }; S.pin = saved.pin;
+    var boot = read(KEY_BOOT);
+    if (boot && boot.user === saved.name && boot.r) {
+      // 快速開啟：先用上次的登入資料和暫存畫面，背景再確認密碼並更新
+      applyLogin(boot.r, false); loadCache(); refresh();
+      doLogin(saved.name, saved.pin, true, true);
+      return;
+    }
+    doLogin(saved.name, saved.pin, true); return;
+  }
   showLogin('');
 }
 function showSetup(err) {
@@ -260,16 +272,25 @@ function showLogin(err) {
     if ($('#chg')) $('#chg').onclick = function () { store(KEY_API, null); showSetup(''); };
   });
 }
-function doLogin(name, pin, silent) {
-  api('login').then(function (r) {
-    S.me = r.me; S.members = r.members; S.cats = r.cats; S.accounts = r.accounts; S.cycles = r.cycles; S.storeRules = r.storeRules || []; S.imp = null;
-    S.ledger = isParent() ? '家庭' : r.me.name;
-    store(KEY, { name: name, pin: pin });
+function applyLogin(r, keepView) {
+  S.me = r.me; S.members = r.members; S.cats = r.cats; S.accounts = r.accounts; S.cycles = r.cycles; S.storeRules = r.storeRules || [];
+  if (!keepView) {
+    S.imp = null; S.ledger = isParent() ? '家庭' : r.me.name;
     S.f = newForm('支出'); S.r = newRep();
-    refresh();
-  }).catch(function (e) { store(KEY, null); S.pick = name; showLogin(silent ? '' : e.message); });
+  }
 }
-function logout() { store(KEY, null); S.data = null; S.pick = ''; S.q = ''; S.qRes = null; S.qAll = false; showLogin(''); }
+function doLogin(name, pin, silent, background) {
+  api('login').then(function (r) {
+    applyLogin(r, background);
+    store(KEY, { name: name, pin: pin }); store(KEY_BOOT, { user: name, r: r });
+    if (!background) { loadCache(); refresh(); }
+    else if (!isTyping()) render(); else S.needRender = true;
+  }).catch(function (e) {
+    if (background && !/密碼|名稱/.test(e.message)) return;  // 只是暫時連不上，先繼續用暫存畫面
+    store(KEY, null); store(KEY_BOOT, null); store(KEY_CACHE, null); S.cache = {}; S.pick = name; showLogin(silent ? '' : e.message);
+  });
+}
+function logout() { store(KEY, null); store(KEY_BOOT, null); store(KEY_CACHE, null); S.cache = {}; S.pending = []; S.gen++; S.reqTok++; S.data = null; S.pick = ''; S.q = ''; S.qRes = null; S.qAll = false; showLogin(''); }
 
 /* ================= 分類與表單 ================= */
 function tpl() { return isFam() ? '家庭' : '零用錢'; }
@@ -294,11 +315,61 @@ function newRep() {
 }
 
 /* ================= 資料更新 ================= */
-function refresh() {
-  setBusy(true); render();
-  api('state', { ym: S.ym, ledger: S.ledger }).then(apply).catch(fail);
+/* ===== 速度：暫存看過的月份、預先載入前後月份 ===== */
+function ckey(ledger, ym) { return ledger + '|' + ym; }
+function loadCache() {
+  var c = read(KEY_CACHE);
+  S.cache = c && S.me && c.user === S.me.name && c.map ? c.map : {};
 }
-function apply(d) { S.data = d; S.ym = d.ym; setBusy(false); render(); }
+function putCache(d, gen) {
+  if (gen !== undefined && gen !== S.gen) return;  // 這份資料是在修改之前抓的，丟掉
+  S.cache[ckey(d.ledger, d.ym)] = { d: d, t: Date.now() };
+  var keys = Object.keys(S.cache).sort(function (a, b) { return S.cache[b].t - S.cache[a].t; });
+  keys.slice(12).forEach(function (k) { delete S.cache[k]; });
+  try { localStorage.setItem(KEY_CACHE, JSON.stringify({ user: S.me ? S.me.name : '', map: S.cache })); } catch (e) {}
+}
+function isTyping() {
+  var a = document.activeElement;
+  return !!a && (a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && a.type !== 'checkbox' && a.type !== 'file'));
+}
+function showFresh(d) {
+  var same = S.data && JSON.stringify(S.data) === JSON.stringify(d);
+  S.data = d; S.ym = d.ym; setBusy(false);
+  if (same) return;
+  if (isTyping() || S.edit) { S.needRender = true; return; }
+  render();
+}
+function refresh() {
+  var k = ckey(S.ledger, S.ym), c = S.cache[k], tok = ++S.reqTok, gen = S.gen;
+  if (c) { S.data = c.d; setBusy(false); } else { S.data = null; setBusy(true); }
+  render();
+  api('state', { ym: S.ym, ledger: S.ledger }).then(function (d) {
+    if (gen !== S.gen) { if (tok === S.reqTok && !S.data) refresh(); return; }  // 這段時間資料被修改過，這份已經過時
+    putCache(d);
+    if (tok !== S.reqTok) return;
+    showFresh(d); prefetch();
+  }).catch(function (e) {
+    if (tok !== S.reqTok) return;
+    if (c && !/密碼|名稱/.test(e.message)) { setBusy(false); toast('目前顯示的是暫存資料（' + e.message + '）', 3500); return; }
+    fail(e);
+  });
+}
+function shiftYm(ym, n) { var y = Number(ym.slice(0, 4)), m = Number(ym.slice(5)) - 1 + n; return ymOf(new Date(y, m, 1)); }
+function prefetch() {
+  clearTimeout(S.pfTimer);
+  S.pfTimer = setTimeout(function () {
+    var l = S.ledger, gen = S.gen;
+    [shiftYm(S.ym, -1), shiftYm(S.ym, 1)].forEach(function (m, i) {
+      if (S.cache[ckey(l, m)]) return;
+      setTimeout(function () { if (gen === S.gen) api('state', { ym: m, ledger: l }).then(function (d) { putCache(d, gen); }).catch(function () {}); }, i * 400);
+    });
+  }, 700);
+}
+// 修改資料後：其他月份的暫存可能過時（帳戶餘額、趨勢），全部清掉，只留剛拿到的這個月
+function apply(d) { S.gen++; S.cache = {}; putCache(d); S.data = d; S.ym = d.ym; setBusy(false); render(); prefetch(); }
+document.addEventListener('focusout', function () {
+  setTimeout(function () { if (S.needRender && !isTyping() && !S.edit) { S.needRender = false; render(); } }, 50);
+});
 function fail(e) {
   setBusy(false);
   if (/密碼|名稱/.test(e.message)) { logout(); return; }
@@ -307,6 +378,12 @@ function fail(e) {
 function setBusy(b) { S.busy = b; var a = $('#main'); if (a) a.classList.toggle('loading', b); }
 
 /* ================= 計算 ================= */
+function withPending(d) {
+  var extra = S.pending.filter(function (p) { return p.ledger === S.ledger && p.date.slice(0, 7) === S.ym; });
+  if (!extra.length) return d;
+  var recs = extra.concat(d.records).sort(function (a, b) { return b.date.localeCompare(a.date); });
+  return Object.assign({}, d, { records: recs });
+}
 function totals(rs) {
   var inc = 0, exp = 0;
   rs.forEach(function (r) { if (r.type === '收入') inc += r.amount; else if (r.type === '支出') exp += r.amount; });
@@ -347,7 +424,7 @@ function settlement(d) {
 /* ================= 畫面 ================= */
 function render() {
   if (!S.me || !S.f) return;
-  var d = S.data || { records: [], budgets: {}, trend: [], balance: null };
+  var d = withPending(S.data || { records: [], budgets: {}, trend: [], balance: null });
   var t = totals(d.records);
   var y = S.ym.slice(0, 4), m = Number(S.ym.slice(5));
   var seg = '';
@@ -510,10 +587,11 @@ function dayGroups(list, showYear) {
         if (r.by && (!SPLIT || r.by !== r.payer)) meta.push(r.by + ' 記');
         if (S.edit && S.edit.id === r.id) return viewEdit(r);
         var cls = r.type === '收入' ? 'in">+' : r.type === '支出' ? 'out">' : '">';
-        return '<div class="item"><div class="t"><b>' + title + '</b>' + (r.note ? '<p>' + esc(r.note) + '</p>' : '') +
+        return '<div class="item' + (r.pending ? ' pending' : '') + '"><div class="t"><b>' + title + '</b>' + (r.note ? '<p>' + esc(r.note) + '</p>' : '') +
           (meta.length ? '<p>' + esc(meta.join('，')) + '</p>' : '') + '</div><div><div class="a ' + cls + money(r.amount) + '</div>' +
+          (r.pending ? '<span class="saving">儲存中…</span>' :
           (isParent() ? '<button type="button" class="del" data-edit="' + esc(r.id) + '">修改</button>' : '') +
-          '<button type="button" class="del" data-del="' + esc(r.id) + '">刪除</button></div></div>';
+          '<button type="button" class="del" data-del="' + esc(r.id) + '">刪除</button>') + '</div></div>';
       }).join('') + '</div></section>';
   }).join('');
 }
@@ -680,7 +758,7 @@ function bind() {
   if ($('#prev')) { $('#prev').onclick = function () { shift(-1); }; $('#next').onclick = function () { shift(1); }; }
   $$('nav button').forEach(function (b) { b.onclick = function () { S.tab = b.dataset.tab; S.edit = null; render(); window.scrollTo(0, 0); }; });
   $$('.seg button').forEach(function (b) { b.onclick = function () {
-    S.ledger = b.dataset.ledger; S.f = newForm('支出'); S.data = null; S.edit = null; S.q = ''; S.qRes = null; refresh(); }; });
+    S.ledger = b.dataset.ledger; S.f = newForm('支出'); S.edit = null; S.q = ''; S.qRes = null; refresh(); }; });
   bindItems();
   if ($('#q')) {
     $('#q').addEventListener('input', function (e) {
@@ -709,7 +787,7 @@ function findRec(id) {
   var pool = (S.data ? S.data.records : []).concat(S.qRes ? S.qRes.records : []);
   return pool.filter(function (x) { return x.id === id; })[0];
 }
-function updateList() { var el = $('#listBody'); if (!el) return; el.innerHTML = listBody(S.data || { records: [] }); bindItems(); }
+function updateList() { var el = $('#listBody'); if (!el) return; el.innerHTML = listBody(withPending(S.data || { records: [] })); bindItems(); }
 function runSearch() {
   var q = S.q.trim(), tok = ++S.qTok;
   if (!q || !S.qAll) { S.qRes = null; updateList(); return; }
@@ -791,7 +869,7 @@ function bindRest() {
 function shift(n) {
   S.edit = null;
   var y = Number(S.ym.slice(0, 4)), m = Number(S.ym.slice(5)) - 1 + n;
-  S.ym = ymOf(new Date(y, m, 1)); S.data = null; refresh();
+  S.ym = ymOf(new Date(y, m, 1)); refresh();
 }
 
 function submit(e) {
@@ -802,19 +880,50 @@ function submit(e) {
   var rec = { ledger: S.ledger, type: f.type, amount: amount, date: f.date || today(), cat: f.cat, sub: f.sub, note: f.note.trim(),
     account: f.account, toAccount: f.toAccount, payer: f.payer, who: f.who, invoice: f.invoice, recurringId: f.recurringId,
     installments: f.type === '支出' && isFam() ? Number(f.inst) || 0 : 0 };
+  var keep = { type: f.type, cat: f.cat, sub: f.sub, date: f.date, account: f.account, toAccount: f.toAccount, payer: f.payer, who: f.who };
+  // 一般的一筆：先顯示、背景存檔（分期和定期帳單仍等存好再顯示）
+  if (!(rec.installments > 1) && !rec.recurringId) {
+    var tr = rec.type === '轉帳';
+    var tmp = { id: 'tmp' + Date.now() + Math.random().toString(36).slice(2, 6), pending: true, ledger: S.ledger, date: rec.date, type: rec.type,
+      cat: tr ? '轉帳' : rec.cat, sub: tr ? '' : rec.sub, amount: Math.round(amount), note: rec.note, who: isFam() ? rec.who : S.ledger,
+      payer: rec.payer, account: rec.account, toAccount: tr ? rec.toAccount : '', invoice: rec.invoice, by: S.me.name };
+    var before = f;
+    S.pending.push(tmp); S.gen++;
+    S.f = newForm(f.type); for (var k in keep) S.f[k] = keep[k];
+    toast('已記下 ' + money(amount) + ' 元');
+    if (rec.date.slice(0, 7) !== S.ym) { S.ym = rec.date.slice(0, 7); refresh(); } else render();
+    var a0 = $('#amount'); if (a0) a0.focus();
+    api('add', { rec: rec }).then(function (d) {
+      S.pending = S.pending.filter(function (p) { return p.id !== tmp.id; });
+      S.gen++; S.cache = {}; putCache(d);
+      if (ckey(S.ledger, S.ym) === ckey(d.ledger, d.ym)) showFresh(d); else if (!isTyping()) render();
+      prefetch();
+      var warn = budgetWarn(d, rec);
+      if (warn) toast(warn, 3500);
+    }).catch(function (err) {
+      S.pending = S.pending.filter(function (p) { return p.id !== tmp.id; });
+      if (/密碼|名稱/.test(err.message)) { fail(err); return; }
+      if (!S.f.amount && !S.f.note) S.f = before;  // 還沒開始記下一筆，就把剛剛的內容放回表單
+      render();
+      toast('剛剛那筆 ' + money(amount) + ' 元沒有存到：' + err.message, 5000);
+    });
+    return;
+  }
   setBusy(true); $('#saveBtn').disabled = true;
   api('add', { rec: rec }).then(function (d) {
-    var keep = { type: f.type, cat: f.cat, sub: f.sub, date: f.date, account: f.account, toAccount: f.toAccount, payer: f.payer, who: f.who };
     S.f = newForm(f.type); for (var k in keep) S.f[k] = keep[k];
     apply(d);
     var msg = rec.installments > 1 ? '已分成 ' + rec.installments + ' 期記下，共 ' + money(amount) + ' 元' : '已記下 ' + money(amount) + ' 元';
-    if (f.type === '支出' && d.budgets && d.budgets[f.cat]) {
-      var spent = byCat(d.records)[f.cat] || 0, b = d.budgets[f.cat];
-      if (spent > b) msg += '。' + f.cat + ' 已超出預算 ' + money(spent - b) + ' 元';
-      else if (spent >= b * 0.8) msg += '。' + f.cat + ' 預算只剩 ' + money(b - spent) + ' 元';
-    }
-    toast(msg, 3500);
+    var warn = budgetWarn(d, rec);
+    toast(msg + (warn ? '。' + warn : ''), 3500);
   }).catch(fail);
+}
+function budgetWarn(d, rec) {
+  if (rec.type !== '支出' || !d.budgets || !d.budgets[rec.cat]) return '';
+  var spent = byCat(d.records)[rec.cat] || 0, b = d.budgets[rec.cat];
+  if (spent > b) return rec.cat + ' 已超出預算 ' + money(spent - b) + ' 元';
+  if (spent >= b * 0.8) return rec.cat + ' 預算只剩 ' + money(b - spent) + ' 元';
+  return '';
 }
 
 /* ================= 掃描電子發票 QR Code ================= */
@@ -1125,7 +1234,7 @@ function bindImport() {
     var rules = pick.filter(function (x) { return x.sellerId; }).map(function (x) { return { sellerId: x.sellerId, store: x.store, cat: x.cat, sub: x.sub }; });
     setBusy(true);
     api('importSave', { recs: recs, rules: rules }).then(function (r) {
-      S.storeRules = r.storeRules || S.storeRules; S.imp = null;
+      S.storeRules = r.storeRules || S.storeRules; S.imp = null; S.gen++; S.cache = {};
       toast('已匯入 ' + r.added + ' 張' + (r.skipped ? '，略過 ' + r.skipped + ' 張' : ''), 3500);
       refresh();
     }).catch(fail);
