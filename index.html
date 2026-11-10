@@ -44,7 +44,8 @@ button{cursor:pointer}
 .month b{font-family:var(--num);font-weight:400;font-size:20px}
 .month button{border:1px solid var(--line);background:var(--paper);border-radius:10px;width:40px;height:36px;font-size:18px}
 .sum{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:14px;overflow:hidden;margin:10px 0 16px}
-.sum div{background:var(--paper);padding:10px 12px}
+.sum > *{background:var(--paper);padding:10px 12px;border:0;text-align:left;font:inherit;color:inherit;border-radius:0}
+.sum button[aria-pressed=true]{box-shadow:inset 0 -3px 0 var(--ink)}
 .sum small{display:block;color:var(--muted);font-size:13px}
 .sum span{font-family:var(--num);font-size:19px}
 .big{background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:16px;margin:10px 0 16px}
@@ -92,14 +93,31 @@ label > input,label > select{display:block;width:100%;margin-top:3px;padding:9px
 .item .t b{font-weight:600}
 .item .t p{margin:1px 0 0;font-size:14px;color:var(--muted);overflow-wrap:anywhere}
 .item .a{font-family:var(--num);font-size:18px;white-space:nowrap;text-align:right}
+.item.editing{background:var(--soft)}
+.search{display:flex;gap:8px;margin:0 0 12px}
+.search input{flex:1;min-width:0;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--paper);font-size:16px;color:var(--ink)}
+.search select{padding:10px 8px;border:1px solid var(--line);border-radius:12px;background:var(--paper);font-size:15px;color:var(--ink)}
+.qsum{margin:0 4px 10px;font-size:14px;color:var(--muted)}
+.seg.tf{margin:0 0 12px}
+.seg.tf button{padding:6px 8px;font-size:14px}
+.row2{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}
 .del{display:block;margin-left:auto;border:0;background:none;color:var(--muted);font-size:13px;padding:2px 0;text-decoration:underline}
 /* 報表 */
 .donut{display:flex;gap:16px;align-items:center;flex-wrap:wrap}
 .donut svg{width:150px;height:150px;flex:none}
 .legend{flex:1;min-width:180px;margin:0;padding:0;list-style:none;font-size:14px}
-.legend li{display:flex;align-items:center;gap:8px;padding:3px 0}
-.legend i{width:10px;height:10px;border-radius:3px;flex:none}
-.legend span:last-child{margin-left:auto;font-family:var(--num)}
+.legend li{padding:0}
+.lg{display:flex;align-items:center;gap:8px;width:100%;border:0;background:none;padding:6px 0;text-align:left;font-size:14px;color:var(--ink)}
+.lg i{width:10px;height:10px;border-radius:3px;flex:none}
+.lg > span:last-child{margin-left:auto;font-family:var(--num);white-space:nowrap}
+.lg .caret{color:var(--muted);font-size:11px}
+.catdetail{background:var(--soft);border-radius:10px;padding:8px 12px;margin:2px 0 8px}
+.catdetail .subs{margin-bottom:6px}
+.catdetail .bar{border-top:0;padding:5px 0}
+.rec{display:flex;gap:8px;align-items:flex-start;padding:6px 0;border-top:1px solid var(--line);font-size:14px}
+.rec .d{color:var(--muted);width:38px;flex:none}
+.rec .n{flex:1;min-width:0;overflow-wrap:anywhere}
+.rec .a{font-family:var(--num);white-space:nowrap}
 .bar{padding:8px 0;border-top:1px solid var(--line)}
 .bar:first-of-type{border-top:0}
 .bar .row{display:flex;justify-content:space-between;gap:8px}
@@ -173,7 +191,7 @@ var KEY = 'family-ledger-login', KEY_API = 'family-ledger-api';
 var WEEK = '日一二三四五六';
 var COLORS = ['#2F7D69', '#C4553F', '#D19A2E', '#4677A8', '#8A5A9E', '#6E8B2A', '#B86A2E', '#4E8E9C', '#A54D6B', '#7B7F86'];
 var S = { me: null, pin: '', members: [], cats: [], accounts: [], cycles: [], ledger: '家庭', ym: ymOf(new Date()),
-  data: null, tab: 'add', busy: false, pick: '', f: null, r: null, imp: null, storeRules: [] };
+  data: null, tab: 'add', busy: false, pick: '', f: null, r: null, imp: null, storeRules: [], edit: null, repCat: null, q: '', qAll: false, qRes: null, qTok: 0, typeF: '' };
 
 function ymOf(d) { return d.getFullYear() + '-' + ('0' + (d.getMonth() + 1)).slice(-2); }
 function today() { var d = new Date(); return ymOf(d) + '-' + ('0' + d.getDate()).slice(-2); }
@@ -251,7 +269,7 @@ function doLogin(name, pin, silent) {
     refresh();
   }).catch(function (e) { store(KEY, null); S.pick = name; showLogin(silent ? '' : e.message); });
 }
-function logout() { store(KEY, null); S.data = null; S.pick = ''; showLogin(''); }
+function logout() { store(KEY, null); S.data = null; S.pick = ''; S.q = ''; S.qRes = null; S.qAll = false; showLogin(''); }
 
 /* ================= 分類與表單 ================= */
 function tpl() { return isFam() ? '家庭' : '零用錢'; }
@@ -339,8 +357,10 @@ function render() {
     }).join('') + '</div>';
   }
   var head = isFam()
-    ? '<div class="sum"><div><small>支出</small><span class="out">' + money(t.exp) + '</span></div><div><small>收入</small><span class="in">' + money(t.inc) +
-      '</span></div><div><small>結餘</small><span>' + money(t.inc - t.exp) + '</span></div></div>'
+    ? '<div class="sum">' + [['支出', 'out', t.exp], ['收入', 'in', t.inc], ['', '', t.inc - t.exp]].map(function (c) {
+        var on = S.tab === 'list' && S.typeF === c[0] && c[0] !== '';
+        return '<button type="button" data-sum="' + c[0] + '" aria-pressed="' + on + '" aria-label="' + (c[0] ? '只看' + c[0] + '明細' : '看全部明細') + '"><small>' +
+          (c[0] || '結餘') + '</small><span' + (c[1] ? ' class="' + c[1] + '"' : '') + '>' + money(c[2]) + '</span></button>'; }).join('') + '</div>'
     : '<div class="big"><small>' + (isParent() ? esc(S.ledger) + ' 的' : '我的') + '零用錢還剩</small><div>' + money(d.balance || 0) +
       ' 元</div><small>這個月收入 ' + money(t.inc) + '，花了 ' + money(t.exp) + '</small></div>';
   var tabs = [['add', '記一筆'], ['list', '明細'], ['report', '報表']];
@@ -402,13 +422,16 @@ function viewAdd(d) {
       g += '<label' + (f.type === '支出' && SPLIT ? '' : ' class="full"') + '>這筆是誰的<select data-f="who"><option value="">全家</option>' + opts(memberNames, f.who) + '</select></label>';
     }
   }
+  if (fam && f.type === '支出') {
+    g += '<label class="full">分期付款（不分期就留空）<input data-f="inst" type="number" inputmode="numeric" min="2" max="60" step="1" value="' + esc(f.inst || '') + '" placeholder="例如 8"></label>';
+  }
   g += '<label class="full">細目（買了什麼）<input data-f="note" type="text" maxlength="300" value="' + esc(f.note) + '" placeholder="' +
     (tr ? '例如：繳信用卡費' : '例如：高麗菜、鮮奶') + '"></label>';
   var chips = '';
   if (f.invoice) chips += '<span class="chip">發票 ' + esc(f.invoice) + '<button type="button" data-clear="invoice" aria-label="移除發票">×</button></span>';
   if (f.recurringId) chips += '<span class="chip">定期：' + esc(f.recurringTitle) + '<button type="button" data-clear="recurringId" aria-label="取消定期帳單">×</button></span>';
-  var hint = fam && f.type === '支出' && f.sub === '零用錢' && kids().some(function (k) { return k.name === f.who; })
-    ? '<p class="hint">記下後，' + esc(f.who) + ' 的零用錢帳本會自動多一筆收入。</p>' : '';
+  var hint = (fam && f.type === '支出' ? '<p class="hint" id="instHint">' + esc(instText(f.amount, f.inst, f.date)) + '</p>' : '') + (fam && f.type === '支出' && f.sub === '零用錢' && kids().some(function (k) { return k.name === f.who; })
+    ? '<p class="hint">記下後，' + esc(f.who) + ' 的零用錢帳本會自動多一筆收入。</p>' : '');
   return viewAlerts(d) + '<form class="card" id="af">' +
     '<div class="typ" role="group" aria-label="類型">' + types.map(function (x) {
       return '<button type="button" data-type="' + x + '" aria-pressed="' + (f.type === x) + '">' + x + '</button>'; }).join('') +
@@ -419,15 +442,61 @@ function viewAdd(d) {
     '<button class="primary" type="submit" id="saveBtn"' + (S.busy ? ' disabled' : '') + '>記下這筆</button></form>';
 }
 
+function instText(amount, inst, date) {
+  var n = Math.round(Number(inst) || 0), a = Math.round(Number(amount) || 0);
+  if (n < 2) return '';
+  if (n > 60) return '分期最多 60 期';
+  if (!(a > 0)) return '輸入金額後會顯示每期金額';
+  return '會從 ' + Number(String(date || today()).slice(5, 7)) + ' 月開始，連續 ' + n + ' 個月各記一筆，每期約 ' + money(Math.floor(a / n)) + ' 元。';
+}
+
 function viewList(d) {
-  if (!d.records.length) return '<p class="empty">這個月還沒有記錄。到「記一筆」新增第一筆。</p>';
+  return '<form class="search" id="qf" role="search"><input id="q" type="search" enterkeyhint="search" autocomplete="off" placeholder="搜尋店家、品項、金額、發票號碼" value="' +
+    esc(S.q) + '" aria-label="搜尋明細"><select id="qScope" aria-label="搜尋範圍"><option value="month"' + (S.qAll ? '' : ' selected') + '>這個月</option>' +
+    '<option value="all"' + (S.qAll ? ' selected' : '') + '>全部月份</option></select></form>' +
+    '<div class="seg tf" role="group" aria-label="類型">' + (isFam() ? ['', '支出', '收入', '轉帳'] : ['', '支出', '收入']).map(function (x) {
+      return '<button type="button" data-tf="' + x + '" aria-pressed="' + (S.typeF === x) + '">' + (x || '全部') + '</button>'; }).join('') + '</div>' +
+    '<div id="listBody">' + listBody(d) + '</div>';
+}
+
+function matchRec(r, q) {
+  var hay = [r.note, r.sub, r.cat, r.who, r.payer, r.account, r.toAccount, r.invoice, r.by, String(r.amount), r.date].join(' ').toLowerCase();
+  return q.toLowerCase().split(/\s+/).filter(function (w) { return w; }).every(function (w) { return hay.indexOf(w) >= 0; });
+}
+
+function listBody(d) {
+  var q = S.q.trim(), recs, sum = '';
+  if (q && S.qAll) {
+    if (!S.qRes) return '<p class="empty">搜尋中…</p>';
+    recs = S.qRes.records;
+    sum = '全部月份找到 ' + S.qRes.count + ' 筆' + (S.qRes.exp ? '，支出 ' + money(S.qRes.exp) + ' 元' : '') + (S.qRes.inc ? '，收入 ' + money(S.qRes.inc) + ' 元' : '') +
+      (S.qRes.more ? '（只列出最近 300 筆）' : '');
+  } else if (q) {
+    recs = d.records.filter(function (r) { return matchRec(r, q); });
+    var t = totals(recs);
+    sum = '這個月找到 ' + recs.length + ' 筆' + (t.exp ? '，支出 ' + money(t.exp) + ' 元' : '') + (t.inc ? '，收入 ' + money(t.inc) + ' 元' : '');
+  } else recs = d.records;
+  if (S.typeF) {
+    recs = recs.filter(function (r) { return r.type === S.typeF; });
+    var ft = recs.reduce(function (a, r) { return a + r.amount; }, 0);
+    sum = (q && S.qAll ? '全部月份' : '這個月') + (q ? '符合「' + q + '」的' : '') + S.typeF + ' ' + recs.length + ' 筆' + (S.typeF === '轉帳' ? '' : '，共 ' + money(ft) + ' 元') +
+      (q && S.qAll && S.qRes.more ? '（只從最近 300 筆中篩選）' : '');
+    if (!recs.length) return '<p class="empty">' + esc(sum.replace(/ 0 筆.*$/, '')) + '沒有記錄。</p>';
+  }
+  if (!recs.length) return q ? '<p class="empty">找不到符合「' + esc(q) + '」的記錄' + (S.qAll ? '' : '，可以把範圍改成「全部月份」再找找看') + '。</p>'
+    : '<p class="empty">這個月還沒有記錄。到「記一筆」新增第一筆。</p>';
+  return (sum ? '<p class="qsum">' + esc(sum) + '</p>' : '') + dayGroups(recs, !!(q && S.qAll));
+}
+
+function dayGroups(list, showYear) {
   var groups = [], map = {};
-  d.records.forEach(function (r) { if (!map[r.date]) { map[r.date] = []; groups.push(r.date); } map[r.date].push(r); });
+  list.forEach(function (r) { if (!map[r.date]) { map[r.date] = []; groups.push(r.date); } map[r.date].push(r); });
   return groups.map(function (date) {
-    var rs = map[date], out = 0;
-    rs.forEach(function (r) { if (r.type === '支出') out += r.amount; });
+    var rs = map[date], out = 0, inc = 0;
+    rs.forEach(function (r) { if (r.type === '支出') out += r.amount; else if (r.type === '收入') inc += r.amount; });
+    var dayLabel = S.typeF === '收入' ? '收入 ' + money(inc) : S.typeF === '轉帳' ? '' : '支出 ' + money(out);
     var dt = new Date(date + 'T00:00:00');
-    return '<section class="day"><h3><span>' + (dt.getMonth() + 1) + '/' + dt.getDate() + '（' + WEEK[dt.getDay()] + '）</span><span>支出 ' + money(out) +
+    return '<section class="day"><h3><span>' + (showYear ? dt.getFullYear() + '/' : '') + (dt.getMonth() + 1) + '/' + dt.getDate() + '（' + WEEK[dt.getDay()] + '）</span><span>' + dayLabel +
       '</span></h3><div class="list">' + rs.map(function (r) {
         var title, meta = [];
         if (r.type === '轉帳') title = '轉帳 ' + esc(r.account) + ' 到 ' + esc(r.toAccount);
@@ -439,12 +508,57 @@ function viewList(d) {
         }
         if (r.invoice) meta.push('發票 ' + r.invoice);
         if (r.by && (!SPLIT || r.by !== r.payer)) meta.push(r.by + ' 記');
+        if (S.edit && S.edit.id === r.id) return viewEdit(r);
         var cls = r.type === '收入' ? 'in">+' : r.type === '支出' ? 'out">' : '">';
         return '<div class="item"><div class="t"><b>' + title + '</b>' + (r.note ? '<p>' + esc(r.note) + '</p>' : '') +
           (meta.length ? '<p>' + esc(meta.join('，')) + '</p>' : '') + '</div><div><div class="a ' + cls + money(r.amount) + '</div>' +
+          (isParent() ? '<button type="button" class="del" data-edit="' + esc(r.id) + '">修改</button>' : '') +
           '<button type="button" class="del" data-del="' + esc(r.id) + '">刪除</button></div></div>';
       }).join('') + '</div></section>';
   }).join('');
+}
+
+function viewEdit(r) {
+  var e = S.edit, tr = r.type === '轉帳';
+  var g = '';
+  if (!tr) {
+    var cs = catsFor(r.type), subs = subsFor(r.type, e.cat);
+    if (cs.indexOf(e.cat) < 0) cs = [e.cat].concat(cs);
+    g += '<label>分類<select data-e="cat">' + opts(cs, e.cat) + '</select></label>' +
+      '<label>細項<select data-e="sub"' + (subs.length ? '' : ' disabled') + '>' + opts(subs, e.sub) + '</select></label>';
+  }
+  g += '<label>金額<input data-e="amount" type="number" inputmode="numeric" min="1" step="1" value="' + esc(e.amount) + '"></label>' +
+    '<label>日期<input data-e="date" type="date" value="' + esc(e.date) + '"></label>';
+  if (isFam() && !tr) {
+    g += '<label>帳戶<select data-e="account"><option value="">不指定</option>' + opts(S.accounts, e.account) + '</select></label>' +
+      '<label>這筆是誰的<select data-e="who"><option value="">全家</option>' + opts(S.members.map(function (m) { return m.name; }), e.who) + '</select></label>';
+  }
+  g += '<label class="full">細目<input data-e="note" type="text" maxlength="300" value="' + esc(e.note) + '"></label>';
+  if (isFam() && r.type === '支出' && !/分期 \d+\/\d+/.test(r.note || '')) {
+    g += '<label class="full">改成分期付款（不分期就留空）<input data-e="inst" type="number" inputmode="numeric" min="2" max="60" step="1" value="' + esc(e.inst || '') + '" placeholder="例如 8"></label>' +
+      '<p class="hint full" id="editInstHint">' + esc(instText(e.amount, e.inst, e.date)) + (e.inst > 1 ? '金額請填全額。' : '') + '</p>';
+  }
+  return '<div class="item editing"><div class="t"><b>修改' + (tr ? '轉帳' : r.type) + '</b>' + (r.invoice ? '<p>發票 ' + esc(r.invoice) + '</p>' : '') +
+    '<div class="grid" style="margin-top:8px">' + g + '</div><div class="row2"><button type="button" class="mini" id="editCancel">取消</button>' +
+    '<button type="button" class="mini solid" id="editSave">儲存</button></div></div></div>';
+}
+
+function catDetail(d, cat, total) {
+  var rs = d.records.filter(function (r) { return r.type === '支出' && r.cat === cat; });
+  var bySub = {}, subs = [];
+  rs.forEach(function (r) { var k = r.sub || cat; if (!(k in bySub)) { bySub[k] = 0; subs.push(k); } bySub[k] += r.amount; });
+  subs.sort(function (a, b) { return bySub[b] - bySub[a]; });
+  var html = '<div class="catdetail">';
+  if (subs.length > 1 || subs[0] !== cat) {
+    html += '<div class="subs">' + subs.map(function (k) {
+      return '<div class="bar"><div class="row"><span>' + esc(k) + '</span><span>' + money(bySub[k]) + '（' + Math.round(bySub[k] / total * 100) + '%）</span></div>' +
+        '<div class="track"><div class="fill" style="width:' + (bySub[k] / bySub[subs[0]] * 100).toFixed(1) + '%"></div></div></div>'; }).join('') + '</div>';
+  }
+  html += '<div class="recs">' + rs.map(function (r) {
+    return '<div class="rec"><span class="d">' + Number(r.date.slice(5, 7)) + '/' + Number(r.date.slice(8)) + '</span><span class="n"><b>' + esc(r.sub || r.cat) + '</b>' +
+      (r.note ? ' ' + esc(r.note) : '') + (r.who ? ' <span class="who">（' + esc(r.who) + ' 的）</span>' : '') + '</span><span class="a">' + money(r.amount) + '</span></div>'; }).join('') +
+    '</div><p class="hint">共 ' + rs.length + ' 筆。要修改某一筆，到「明細」頁找到它按「修改」。</p></div>';
+  return html;
 }
 
 function donut(entries, total) {
@@ -485,10 +599,14 @@ function viewReport(d, t) {
   var withSpend = cats.filter(function (c) { return spent[c] > 0; });
   if (withSpend.length) {
     var top = withSpend.slice(0, 9).map(function (c) { return { k: c, v: spent[c] }; });
-    if (withSpend.length > 9) top.push({ k: '其他', v: withSpend.slice(9).reduce(function (s, c) { return s + spent[c]; }, 0) });
-    html += '<section class="card"><h2>支出分布</h2><div class="donut">' + donut(top, t.exp) + '<ul class="legend">' + top.map(function (e, i) {
-      return '<li><i style="background:' + COLORS[i % COLORS.length] + '"></i><span>' + esc(e.k) + '</span><span>' + money(e.v) +
-        '（' + Math.round(e.v / t.exp * 100) + '%）</span></li>'; }).join('') + '</ul></div></section>';
+    if (withSpend.length > 9) top.push({ k: '其餘分類', v: withSpend.slice(9).reduce(function (s, c) { return s + spent[c]; }, 0) });
+    if (S.repCat && withSpend.indexOf(S.repCat) < 0) S.repCat = null;
+    html += '<section class="card"><h2>支出分布</h2><div class="donut">' + donut(top, t.exp) + '<ul class="legend">' + withSpend.map(function (c, i) {
+      var open = S.repCat === c;
+      return '<li><button type="button" class="lg" data-repcat="' + esc(c) + '" aria-expanded="' + open + '"><i style="background:' + COLORS[Math.min(i, 9)] +
+        '"></i><span>' + esc(c) + ' <span class="caret">' + (open ? '▾' : '▸') + '</span></span><span>' + money(spent[c]) +
+        '（' + Math.round(spent[c] / t.exp * 100) + '%）</span></button>' + (open ? catDetail(d, c, spent[c]) : '') + '</li>'; }).join('') +
+      '</ul></div><p class="hint">點分類可以看裡面的細項和每一筆明細。</p></section>';
   } else html += '<p class="empty">這個月還沒有支出。</p>';
 
   html += '<section class="card trend"><h2>近 12 個月</h2>' + trendChart(d.trend) + '</section>';
@@ -560,17 +678,76 @@ function viewMore(d) {
 function bind() {
   $('#out').onclick = logout;
   if ($('#prev')) { $('#prev').onclick = function () { shift(-1); }; $('#next').onclick = function () { shift(1); }; }
-  $$('nav button').forEach(function (b) { b.onclick = function () { S.tab = b.dataset.tab; render(); window.scrollTo(0, 0); }; });
+  $$('nav button').forEach(function (b) { b.onclick = function () { S.tab = b.dataset.tab; S.edit = null; render(); window.scrollTo(0, 0); }; });
   $$('.seg button').forEach(function (b) { b.onclick = function () {
-    S.ledger = b.dataset.ledger; S.f = newForm('支出'); S.data = null; refresh(); }; });
-  $$('[data-del]').forEach(function (b) { b.onclick = function () {
-    if (!confirm('確定要刪除這筆記錄嗎？')) return;
-    setBusy(true); api('delete', { id: b.dataset.del, ym: S.ym, ledger: S.ledger }).then(function (d) { apply(d); toast('已刪除'); }).catch(fail); }; });
+    S.ledger = b.dataset.ledger; S.f = newForm('支出'); S.data = null; S.edit = null; S.q = ''; S.qRes = null; refresh(); }; });
+  bindItems();
+  if ($('#q')) {
+    $('#q').addEventListener('input', function (e) {
+      S.q = e.target.value; S.edit = null;
+      if (S.qAll) { S.qRes = null; clearTimeout(S.qTimer); S.qTimer = setTimeout(runSearch, 500); }
+      updateList();
+    });
+    $('#qf').onsubmit = function (e) { e.preventDefault(); $('#q').blur(); if (S.qAll) runSearch(); };
+    $('#qScope').onchange = function (e) { S.qAll = e.target.value === 'all'; S.qRes = null; S.edit = null; if (S.qAll && S.q.trim()) runSearch(); updateList(); };
+  }
+  $$('[data-repcat]').forEach(function (b) { b.onclick = function () {
+    S.repCat = S.repCat === b.dataset.repcat ? null : b.dataset.repcat; render(); }; });
+  $$('[data-tf]').forEach(function (b) { b.onclick = function () { S.typeF = b.dataset.tf; S.edit = null; render(); }; });
+  $$('[data-sum]').forEach(function (b) { b.onclick = function () {
+    var t = b.dataset.sum;
+    S.typeF = S.tab === 'list' && S.typeF === t ? '' : t; S.tab = 'list'; S.edit = null; render(); window.scrollTo(0, 0); }; });
   $$('[data-rep-use]').forEach(function (b) { b.onclick = function () {
     var r = S.data.recurring.filter(function (x) { return x.id === b.dataset.repUse; })[0]; if (!r) return;
     S.f = newForm(r.type); S.f.cat = r.cat; S.f.sub = r.sub; S.f.amount = r.amount || ''; S.f.account = r.account;
     if (r.payer) S.f.payer = r.payer; S.f.note = r.title; S.f.date = r.next < today() ? today() : r.next;
     S.f.recurringId = r.id; S.f.recurringTitle = r.title; S.tab = 'add'; render(); var a = $('#amount'); if (a) a.focus(); }; });
+  bindRest();
+}
+
+function findRec(id) {
+  var pool = (S.data ? S.data.records : []).concat(S.qRes ? S.qRes.records : []);
+  return pool.filter(function (x) { return x.id === id; })[0];
+}
+function updateList() { var el = $('#listBody'); if (!el) return; el.innerHTML = listBody(S.data || { records: [] }); bindItems(); }
+function runSearch() {
+  var q = S.q.trim(), tok = ++S.qTok;
+  if (!q || !S.qAll) { S.qRes = null; updateList(); return; }
+  api('search', { q: q, ledger: S.ledger }).then(function (res) { if (tok !== S.qTok) return; S.qRes = res; updateList(); })
+    .catch(function (e) { if (tok === S.qTok) toast(e.message, 3500); });
+}
+function afterChange(d, msg) { apply(d); toast(msg); if (S.qAll && S.q.trim()) runSearch(); }
+
+function bindItems() {
+  $$('[data-edit]').forEach(function (b) { b.onclick = function () {
+    var r = findRec(b.dataset.edit); if (!r) return;
+    S.edit = { id: r.id, cat: r.cat, sub: r.sub, amount: r.amount, date: r.date, account: r.account || '', who: r.who || '', note: r.note || '' };
+    if (r.type !== '轉帳' && subsFor(r.type, r.cat).indexOf(r.sub) < 0) S.edit.sub = subsFor(r.type, r.cat)[0] || r.sub;
+    render(); }; });
+  $$('[data-e]').forEach(function (el) {
+    var k = el.dataset.e;
+    el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', function () {
+      S.edit[k] = el.value;
+      if (k === 'inst' || k === 'amount' || k === 'date') { var hb = $('#editInstHint'); if (hb) hb.textContent = instText(S.edit.amount, S.edit.inst, S.edit.date) + (Number(S.edit.inst) > 1 ? '金額請填全額。' : ''); }
+      if (k === 'cat') { var r = findRec(S.edit.id);
+        S.edit.sub = subsFor(r.type, S.edit.cat)[0] || ''; render(); }
+    });
+  });
+  if ($('#editCancel')) $('#editCancel').onclick = function () { S.edit = null; render(); };
+  if ($('#editSave')) $('#editSave').onclick = function () {
+    if (!(Number(S.edit.amount) > 0)) { toast('請輸入金額'); return; }
+    var e = S.edit, moved = e.date.slice(0, 7) !== S.ym, n = Math.round(Number(e.inst) || 0);
+    if (n > 1 && !confirm('把這筆 ' + money(e.amount) + ' 元拆成 ' + n + ' 期，從 ' + Number(e.date.slice(5, 7)) + ' 月開始每月一筆？')) return;
+    setBusy(true);
+    api('update', { id: e.id, rec: { cat: e.cat, sub: e.sub, amount: e.amount, date: e.date, account: e.account, who: e.who, note: e.note, installments: n > 1 ? n : 0 }, ym: S.ym, ledger: S.ledger }).then(function (d) {
+      S.edit = null; afterChange(d, n > 1 ? '已拆成 ' + n + ' 期' : moved && !S.qAll ? '已儲存，這筆已移到 ' + Number(e.date.slice(5, 7)) + ' 月' : '已儲存修改');
+    }).catch(fail); };
+  $$('[data-del]').forEach(function (b) { b.onclick = function () {
+    if (!confirm('確定要刪除這筆記錄嗎？')) return;
+    setBusy(true); api('delete', { id: b.dataset.del, ym: S.ym, ledger: S.ledger }).then(function (d) { afterChange(d, '已刪除'); }).catch(fail); }; });
+}
+
+function bindRest() {
   $$('[data-rep-skip]').forEach(function (b) { b.onclick = function () {
     if (!confirm('略過這次，直接排到下一期？')) return;
     setBusy(true); api('repSkip', { id: b.dataset.repSkip, ym: S.ym }).then(function (d) { apply(d); toast('已排到下一期'); }).catch(fail); }; });
@@ -583,6 +760,7 @@ function bind() {
     var k = el.dataset.f;
     el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', function () {
       S.f[k] = el.value;
+      if (k === 'inst' || k === 'amount' || k === 'date') { var hb = $('#instHint'); if (hb) hb.textContent = instText(S.f.amount, S.f.inst, S.f.date); }
       if (k === 'cat') { S.f.sub = subsFor(S.f.type, S.f.cat)[0] || ''; render(); }
       else if (k === 'sub' || k === 'who') render();
     });
@@ -611,6 +789,7 @@ function bind() {
 }
 
 function shift(n) {
+  S.edit = null;
   var y = Number(S.ym.slice(0, 4)), m = Number(S.ym.slice(5)) - 1 + n;
   S.ym = ymOf(new Date(y, m, 1)); S.data = null; refresh();
 }
@@ -621,13 +800,14 @@ function submit(e) {
   var f = S.f, amount = Number(f.amount);
   if (!(amount > 0)) { toast('請輸入金額'); $('#amount').focus(); return; }
   var rec = { ledger: S.ledger, type: f.type, amount: amount, date: f.date || today(), cat: f.cat, sub: f.sub, note: f.note.trim(),
-    account: f.account, toAccount: f.toAccount, payer: f.payer, who: f.who, invoice: f.invoice, recurringId: f.recurringId };
+    account: f.account, toAccount: f.toAccount, payer: f.payer, who: f.who, invoice: f.invoice, recurringId: f.recurringId,
+    installments: f.type === '支出' && isFam() ? Number(f.inst) || 0 : 0 };
   setBusy(true); $('#saveBtn').disabled = true;
   api('add', { rec: rec }).then(function (d) {
     var keep = { type: f.type, cat: f.cat, sub: f.sub, date: f.date, account: f.account, toAccount: f.toAccount, payer: f.payer, who: f.who };
     S.f = newForm(f.type); for (var k in keep) S.f[k] = keep[k];
     apply(d);
-    var msg = '已記下 ' + money(amount) + ' 元';
+    var msg = rec.installments > 1 ? '已分成 ' + rec.installments + ' 期記下，共 ' + money(amount) + ' 元' : '已記下 ' + money(amount) + ' 元';
     if (f.type === '支出' && d.budgets && d.budgets[f.cat]) {
       var spent = byCat(d.records)[f.cat] || 0, b = d.budgets[f.cat];
       if (spent > b) msg += '。' + f.cat + ' 已超出預算 ' + money(spent - b) + ' 元';
