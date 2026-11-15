@@ -156,7 +156,12 @@ nav button[aria-current=page]{color:var(--ink);font-weight:700;box-shadow:inset 
 .loading{opacity:.55;pointer-events:none}
 /* 掃描畫面 */
 .scanner{position:fixed;inset:0;background:#000;z-index:30;display:flex;flex-direction:column}
-.scanner video{flex:1;width:100%;object-fit:cover;min-height:0}
+.scanner .vwrap{position:relative;flex:1;min-height:0}
+.scanner video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.scanner .aim{position:absolute;left:8%;right:8%;top:30%;bottom:30%;border:2px solid rgba(255,255,255,.85);border-radius:12px;box-shadow:0 0 0 999px rgba(0,0,0,.35)}
+.scanner .btns + .btns{margin-top:8px}
+.scanner .photo{flex:1;text-align:center;border-radius:12px;padding:12px;border:1px solid var(--line);background:var(--paper);font-size:16px;color:var(--ink)}
+.scanner .photo input{position:absolute;width:1px;height:1px;opacity:0}
 .scanner .bar2{background:var(--paper);padding:14px 16px calc(14px + env(safe-area-inset-bottom,0px))}
 .scanner .bar2 p{margin:0 0 10px}
 .scanner .btns{display:flex;gap:10px}
@@ -941,19 +946,37 @@ function openScanner() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('這個瀏覽器不能使用相機，請用 https 網址開啟'); return; }
   var box = document.createElement('div');
   box.className = 'scanner';
-  box.innerHTML = '<video playsinline muted></video><div class="bar2"><p id="scanMsg">把發票下方的兩個 QR Code 放進畫面</p>' +
+  box.innerHTML = '<div class="vwrap"><video playsinline muted></video><div class="aim"></div></div><div class="bar2"><p id="scanMsg">把發票下方的兩個 QR Code 放進框內，距離約 15～20 公分</p>' +
+    '<div class="btns"><button type="button" id="scanTorch" hidden>開手電筒</button><label class="photo">拍照辨識<input type="file" id="scanPhoto" accept="image/*" capture="environment"></label></div>' +
     '<div class="btns"><button type="button" id="scanCancel">取消</button><button type="button" class="go" id="scanUse" disabled>用這張發票</button></div></div>';
   document.body.appendChild(box);
-  SC = { box: box, left: null, right: null, timer: null, stream: null, canvas: document.createElement('canvas') };
+  SC = { box: box, left: null, right: null, timer: null, stream: null, canvas: document.createElement('canvas'), busy: false, det: null, n: 0 };
   $('#scanCancel').onclick = closeScanner;
   $('#scanUse').onclick = function () { finishScan(); };
-  loadJsQR().then(function () {
-    return navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 } }, audio: false });
+  $('#scanPhoto').onchange = function (e) { scanPhoto(e.target.files[0]); e.target.value = ''; };
+  // Android Chrome 內建的條碼辨識比 jsQR 準很多，有就優先用
+  var native = Promise.resolve(null);
+  if ('BarcodeDetector' in window) {
+    native = window.BarcodeDetector.getSupportedFormats().then(function (f) {
+      return f.indexOf('qr_code') >= 0 ? new window.BarcodeDetector({ formats: ['qr_code'] }) : null;
+    }).catch(function () { return null; });
+  }
+  Promise.all([native, loadJsQR().catch(function (e) { return e; })]).then(function (r) {
+    SC && (SC.det = r[0]);
+    if (!r[0] && r[1] instanceof Error) throw r[1];
+    return navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
   }).then(function (stream) {
     if (!SC) { stream.getTracks().forEach(function (t) { t.stop(); }); return; }
     SC.stream = stream;
+    var track = stream.getVideoTracks()[0];
+    try {
+      var cap = track.getCapabilities ? track.getCapabilities() : {};
+      if (cap.focusMode && cap.focusMode.indexOf('continuous') >= 0) track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(function () {});
+      if (cap.torch) { var tb = $('#scanTorch'); tb.hidden = false; var on = false;
+        tb.onclick = function () { on = !on; track.applyConstraints({ advanced: [{ torch: on }] }).catch(function () {}); tb.textContent = on ? '關手電筒' : '開手電筒'; }; }
+    } catch (e) {}
     var v = box.querySelector('video'); v.srcObject = stream; v.play();
-    SC.timer = setInterval(scanFrame, 250);
+    SC.timer = setInterval(scanFrame, 200);
   }).catch(function (e) {
     closeScanner();
     toast(e && e.name === 'NotAllowedError' ? '需要允許使用相機才能掃發票' : (e.message || '無法開啟相機'), 3500);
@@ -965,29 +988,68 @@ function closeScanner() {
   if (SC.stream) SC.stream.getTracks().forEach(function (t) { t.stop(); });
   SC.box.remove(); SC = null;
 }
+function textBytes(str) {
+  // BarcodeDetector 回傳文字：純 ASCII／UTF-8 的發票可以還原成原始位元組
+  var b = Array.prototype.slice.call(new TextEncoder().encode(str)); b.fromText = true; return b;
+}
+function detectIn(source, w, h) {
+  var cands = [];
+  if (SC && SC.det) {
+    return SC.det.detect(source).then(function (codes) {
+      codes.forEach(function (c) { if (c.rawValue) cands.push(textBytes(c.rawValue)); });
+      return cands;
+    }).catch(function () { return cands; });
+  }
+  if (!window.jsQR) return Promise.resolve(cands);
+  // jsQR：用原始解析度，分成整張、左半、右半、中間四塊，左邊那個密的 QR 才讀得到
+  var c = SC.canvas, ctx = c.getContext('2d', { willReadFrequently: true });
+  var big = Math.min(1, 1600 / w); c.width = Math.round(w * big); c.height = Math.round(h * big);
+  ctx.drawImage(source, 0, 0, c.width, c.height);
+  var W = c.width, H = c.height, rects = [[0, 0, Math.round(W * 0.6), H], [Math.round(W * 0.4), 0, W - Math.round(W * 0.4), H],
+    [Math.round(W * 0.15), Math.round(H * 0.15), Math.round(W * 0.7), Math.round(H * 0.7)]];
+  SC.n++;
+  if (SC.n % 3 === 0) rects.push([0, 0, W, H]);
+  rects.forEach(function (rc) {
+    var img = ctx.getImageData(rc[0], rc[1], rc[2], rc[3]);
+    var code = window.jsQR(img.data, img.width, img.height, { inversionAttempts: 'attemptBoth' });
+    if (code && code.binaryData && code.binaryData.length) cands.push(Array.prototype.slice.call(code.binaryData));
+  });
+  return Promise.resolve(cands);
+}
 function scanFrame() {
-  if (!SC) return;
+  if (!SC || SC.busy) return;
   var v = SC.box.querySelector('video');
   if (!v.videoWidth) return;
-  var scale = Math.min(1, 960 / v.videoWidth), w = Math.round(v.videoWidth * scale), h = Math.round(v.videoHeight * scale);
-  var c = SC.canvas; c.width = w; c.height = h;
-  var ctx = c.getContext('2d', { willReadFrequently: true });
-  ctx.drawImage(v, 0, 0, w, h);
-  // 整張、左半、右半各找一次，比較容易同時讀到兩個 QR Code
-  [[0, 0, w, h], [0, 0, Math.round(w * 0.6), h], [Math.round(w * 0.4), 0, w - Math.round(w * 0.4), h]].forEach(function (rc) {
-    var img = ctx.getImageData(rc[0], rc[1], rc[2], rc[3]);
-    var code = window.jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
-    if (code && code.binaryData && code.binaryData.length) takeCode(code.binaryData);
+  SC.busy = true;
+  detectIn(v, v.videoWidth, v.videoHeight).then(function (list) {
+    if (!SC) return; SC.busy = false;
+    list.forEach(function (b) { if (SC) takeCode(b); });
   });
 }
+function scanPhoto(file) {
+  if (!file || !SC) return;
+  $('#scanMsg').textContent = '辨識照片中…';
+  var img = new Image(), url = URL.createObjectURL(file);
+  img.onload = function () {
+    SC.busy = true;
+    detectIn(img, img.naturalWidth, img.naturalHeight).then(function (list) {
+      URL.revokeObjectURL(url);
+      if (!SC) return; SC.busy = false;
+      list.forEach(function (b) { if (SC) takeCode(b); });
+      if (SC && !SC.left) $('#scanMsg').textContent = '照片裡讀不到左邊的 QR Code，請拍近一點、對焦清楚再試一次';
+    });
+  };
+  img.onerror = function () { URL.revokeObjectURL(url); toast('照片讀取失敗'); };
+  img.src = url;
+}
 function takeCode(bytes) {
-  bytes = Array.prototype.slice.call(bytes);
+  var ft = !!bytes.fromText; bytes = Array.prototype.slice.call(bytes); bytes.fromText = ft;
   if (bytes[0] === 0x2A && bytes[1] === 0x2A) { SC.right = bytes; }
   else {
     var head = String.fromCharCode.apply(null, bytes.slice(0, 77));
     if (bytes.length >= 77 && /^[A-Z]{2}\d{8}\d{7}/.test(head)) SC.left = bytes; else return;
   }
-  if (!SC.left) { $('#scanMsg').textContent = '讀到右邊的 QR Code，請讓左邊那個也進入畫面'; return; }
+  if (!SC.left) { $('#scanMsg').textContent = '已讀到右邊，左邊那個比較密：請拿近一點、讓左邊的 QR Code 在框中間，或按「拍照辨識」'; return; }
   var inv = parseInvoice(SC.left, SC.right);
   $('#scanMsg').textContent = '發票 ' + inv.number + '，' + money(inv.total) + ' 元' + (inv.items.length ? '，' + inv.items.length + ' 項商品' : '');
   $('#scanUse').disabled = false;
@@ -1017,12 +1079,13 @@ function parseInvoice(left, right) {
   if (c.length >= 5) {
     var ascii = function (a, b) { return String.fromCharCode.apply(null, left.slice(a + 1, b)); };
     var inQR = Number(ascii(c[1], c[2])), enc = ascii(c[3], c[4]).trim();
+    if (left.fromText && enc === '0') enc = '1';  // 已經被手機解成文字，用 UTF-8 還原
     var rest = left.slice(c[4] + 1);
     if (right) rest = rest.concat(right.slice(2));
     var parts = decodeBytes(rest, enc).split(':');
     for (var i = 0; i + 2 < parts.length + 1; i += 3) {
       var name = (parts[i] || '').trim();
-      if (name && parts[i + 1] !== undefined) out.items.push({ name: name, qty: Number(parts[i + 1]) || 1, price: Number(parts[i + 2]) || 0 });
+      if (name && name.indexOf('\uFFFD') < 0 && parts[i + 1] !== undefined) out.items.push({ name: name, qty: Number(parts[i + 1]) || 1, price: Number(parts[i + 2]) || 0 });
     }
     out.needRight = inQR > out.items.length && !right;
   }
