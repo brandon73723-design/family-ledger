@@ -1043,7 +1043,11 @@ function scanPhoto(file) {
   img.src = url;
 }
 function takeCode(bytes) {
-  var ft = !!bytes.fromText; bytes = Array.prototype.slice.call(bytes); bytes.fromText = ft;
+  var ft = !!bytes.fromText; bytes = Array.prototype.slice.call(bytes);
+  // 有些店家（例如萊爾富）會在最前面加上看不見的 BOM 字元，先去掉
+  while (bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) bytes = bytes.slice(3);
+  while (bytes[0] === 0x20 || bytes[0] === 0x0A || bytes[0] === 0x0D) bytes = bytes.slice(1);
+  bytes.fromText = ft;
   if (bytes[0] === 0x2A && bytes[1] === 0x2A) { SC.right = bytes; }
   else {
     var head = String.fromCharCode.apply(null, bytes.slice(0, 77));
@@ -1075,17 +1079,26 @@ function parseInvoice(left, right) {
   var h = String.fromCharCode.apply(null, left.slice(0, 77));
   var out = { number: h.slice(0, 10), date: (Number(h.slice(10, 13)) + 1911) + '-' + h.slice(13, 15) + '-' + h.slice(15, 17),
     total: parseInt(h.slice(29, 37), 16) || 0, items: [], needRight: false };
-  var c = splitColons(left, 77);
-  if (c.length >= 5) {
-    var ascii = function (a, b) { return String.fromCharCode.apply(null, left.slice(a + 1, b)); };
-    var inQR = Number(ascii(c[1], c[2])), enc = ascii(c[3], c[4]).trim();
+  // 77 碼後面：:營業人自用區:QR 內品項數:總品項數:中文編碼:品名:數量:單價…
+  // 有些店家（例如萊爾富）會省略「總品項數」，所以數字欄位要動態判斷
+  var rest = left.slice(77);
+  if (rest[0] === 0x3A) rest = rest.slice(1);
+  var ci = rest.indexOf(0x3A);
+  if (ci >= 0) {
+    rest = rest.slice(ci + 1);  // 跳過營業人自用區（**********）
+    var nums = [];
+    while (nums.length < 3) {
+      var k = rest.indexOf(0x3A), f = String.fromCharCode.apply(null, (k < 0 ? rest : rest.slice(0, k))).trim();
+      if (!/^\d+$/.test(f)) break;
+      nums.push(f); rest = k < 0 ? [] : rest.slice(k + 1);
+    }
+    var inQR = Number(nums[0]) || 0, enc = nums.length >= 3 ? nums[2] : nums.length === 2 ? nums[1] : '1';
     if (left.fromText && enc === '0') enc = '1';  // 已經被手機解成文字，用 UTF-8 還原
-    var rest = left.slice(c[4] + 1);
     if (right) rest = rest.concat(right.slice(2));
     var parts = decodeBytes(rest, enc).split(':');
-    for (var i = 0; i + 2 < parts.length + 1; i += 3) {
+    for (var i = 0; i + 1 < parts.length; i += 3) {
       var name = (parts[i] || '').trim();
-      if (name && name.indexOf('\uFFFD') < 0 && parts[i + 1] !== undefined) out.items.push({ name: name, qty: Number(parts[i + 1]) || 1, price: Number(parts[i + 2]) || 0 });
+      if (name && name.indexOf('�') < 0) out.items.push({ name: name, qty: Number(parts[i + 1]) || 1, price: Number(parts[i + 2]) || 0 });
     }
     out.needRight = inQR > out.items.length && !right;
   }
